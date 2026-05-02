@@ -11,6 +11,53 @@ app = FastAPI()
 SERVICE_SECRET = os.getenv("SERVICE_SECRET", "")
 
 
+def check_secret(x_secret: Optional[str]):
+    if SERVICE_SECRET and x_secret != SERVICE_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def make_client(proxy_url: Optional[str], session: Optional[Dict[str, Any]]) -> tuple[Client, bool]:
+    cl = Client()
+    if proxy_url:
+        cl.set_proxy(proxy_url)
+    restored = False
+    if session:
+        try:
+            cl.set_settings(session)
+            restored = True
+        except Exception:
+            cl.set_settings({})
+    return cl, restored
+
+
+def do_login(cl: Client, username: str, password: str, restored: bool) -> None:
+    if restored:
+        try:
+            cl.login(username, password)
+            return
+        except Exception:
+            cl.set_settings({})
+
+    try:
+        cl.login(username, password)
+    except Exception as e:
+        err = str(e)
+        if "bad_password" in err.lower() or "BadPassword" in err:
+            raise HTTPException(status_code=400, detail="Usuário ou senha incorretos.")
+        if "challenge" in err.lower() or "Challenge" in err:
+            raise HTTPException(status_code=400, detail="Instagram pediu verificação de segurança. Abra o app e confirme o login.")
+        if "two_factor" in err.lower() or "TwoFactor" in err:
+            raise HTTPException(status_code=400, detail="Esta conta tem 2FA ativo. Desative o 2FA e tente novamente.")
+        raise HTTPException(status_code=400, detail=f"Erro no login: {err}")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    proxy_url: Optional[str] = None
+    session: Optional[Dict[str, Any]] = None
+
+
 class StoryRequest(BaseModel):
     username: str
     password: str
@@ -26,38 +73,20 @@ def health():
     return {"ok": True}
 
 
+@app.post("/login")
+async def login(req: LoginRequest, x_secret: str = Header(default=None)):
+    check_secret(x_secret)
+    cl, restored = make_client(req.proxy_url, req.session)
+    do_login(cl, req.username, req.password, restored)
+    return {"ok": True, "session": cl.get_settings()}
+
+
 @app.post("/story")
 async def post_story(req: StoryRequest, x_secret: str = Header(default=None)):
-    if SERVICE_SECRET and x_secret != SERVICE_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    check_secret(x_secret)
+    cl, restored = make_client(req.proxy_url, req.session)
+    do_login(cl, req.username, req.password, restored)
 
-    cl = Client()
-
-    if req.proxy_url:
-        cl.set_proxy(req.proxy_url)
-
-    # Try to restore session, fallback to fresh login
-    logged_in = False
-    if req.session:
-        try:
-            cl.set_settings(req.session)
-            cl.login(req.username, req.password)
-            logged_in = True
-        except Exception:
-            cl.set_settings({})
-
-    if not logged_in:
-        try:
-            cl.login(req.username, req.password)
-        except Exception as e:
-            err = str(e)
-            if "bad_password" in err.lower() or "BadPassword" in err:
-                raise HTTPException(status_code=400, detail="Senha incorreta.")
-            if "challenge" in err.lower() or "Challenge" in err:
-                raise HTTPException(status_code=400, detail="Instagram pediu verificação de segurança. Abra o app e confirme o login.")
-            raise HTTPException(status_code=400, detail=f"Erro no login: {err}")
-
-    # Download media
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.get(req.media_url)
