@@ -6,6 +6,8 @@ from instagrapi.types import StoryLink
 import httpx
 import tempfile
 import os
+import time
+import random
 
 app = FastAPI()
 SERVICE_SECRET = os.getenv("SERVICE_SECRET", "")
@@ -18,6 +20,8 @@ def check_secret(x_secret: Optional[str]):
 
 def make_client(proxy_url: Optional[str], session: Optional[Dict[str, Any]]) -> tuple[Client, bool]:
     cl = Client()
+    cl.set_locale("pt_BR")
+    cl.set_timezone_offset(-10800)  # UTC-3 Brazil
     if proxy_url:
         cl.set_proxy(proxy_url)
     restored = False
@@ -38,16 +42,20 @@ def do_login(cl: Client, username: str, password: str, restored: bool) -> None:
         except Exception:
             cl.set_settings({})
 
+    time.sleep(random.uniform(2, 4))
     try:
         cl.login(username, password)
     except Exception as e:
         err = str(e)
-        if "bad_password" in err.lower() or "BadPassword" in err:
+        err_lower = err.lower()
+        if "bad_password" in err_lower or "badpassword" in err_lower:
             raise HTTPException(status_code=400, detail="Usuário ou senha incorretos.")
-        if "challenge" in err.lower() or "Challenge" in err:
+        if "challenge" in err_lower:
             raise HTTPException(status_code=400, detail="Instagram pediu verificação de segurança. Abra o app e confirme o login.")
-        if "two_factor" in err.lower() or "TwoFactor" in err:
+        if "two_factor" in err_lower or "twofactor" in err_lower:
             raise HTTPException(status_code=400, detail="Esta conta tem 2FA ativo. Desative o 2FA e tente novamente.")
+        if "blacklist" in err_lower or "ip" in err_lower:
+            raise HTTPException(status_code=400, detail="IP bloqueado pelo Instagram. Tente com outro proxy ou aguarde.")
         raise HTTPException(status_code=400, detail=f"Erro no login: {err}")
 
 
